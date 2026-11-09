@@ -201,7 +201,7 @@ class LiveGPSProcessor:
         # Persist the exact same six-field record locally in JSONL and CSV.
         with self._output_lock:
             with self.output_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(state, separators=(",", ":")) + "\\n")
+                handle.write(json.dumps(state, separators=(",", ":")) + chr(10))
             if self.csv_output_path:
                 new_file = (
                     not self.csv_output_path.exists()
