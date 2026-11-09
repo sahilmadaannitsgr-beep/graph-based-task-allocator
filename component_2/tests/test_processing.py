@@ -117,3 +117,50 @@ def test_unknown_vehicle_has_no_invented_capabilities(tmp_path):
         "vehicle_id", "window_start_timestamp", "window_duration_s",
         "velocity_mps", "direction_degrees", "task_capable_bit_integer"
     }
+
+
+
+def test_two_second_stride_keeps_ten_second_sliding_window_and_writes_csv(tmp_path):
+    import csv
+
+    db_path = tmp_path / "project.db"
+    make_db(db_path)
+    jsonl_path = tmp_path / "states.jsonl"
+    csv_path = tmp_path / "vehicle_states.csv"
+    processor = LiveGPSProcessor(
+        {"window_duration_s": 10, "stride_s": 2, "max_fix_gap_s": 5,
+         "stationary_speed_threshold_mps": 0.5},
+        {}, jsonl_path, logging.getLogger("stride-test"),
+        database_path=db_path, csv_output_path=csv_path
+    )
+
+    emitted = []
+    for second in range(13):
+        state = processor.process({
+            "device_id": "v1",
+            "timestamp": f"2026-01-01T00:00:{second:02d}",
+            "latitude": 1.0 + second * 0.00001,
+            "longitude": 1.0
+        })
+        if state is not None:
+            emitted.append(state)
+
+    # t=0 is the immediate first-fix record; thereafter the configured stride is 2s.
+    assert [int(item["window_start_timestamp"][-2:]) +
+            int(item["window_duration_s"]) for item in emitted[:2]] == [0, 2]
+    assert len(emitted) == 7
+    assert [int(item["window_start_timestamp"][-2:]) for item in emitted] == [
+        0, 0, 0, 0, 0, 0, 2
+    ]
+    assert emitted[-1]["window_duration_s"] == 10.0
+
+    with csv_path.open("r", newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 7
+    assert list(rows[0]) == [
+        "vehicle_id", "window_start_timestamp", "window_duration_s",
+        "velocity_mps", "direction_degrees", "task_capable_bit_integer"
+    ]
+    assert rows[0]["velocity_mps"] == "null"
+    assert rows[0]["direction_degrees"] == "null"
+    assert rows[-1]["window_duration_s"] == "10.0"
