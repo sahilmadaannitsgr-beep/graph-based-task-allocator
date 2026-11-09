@@ -1,6 +1,7 @@
 """Per-vehicle sliding-window GPS features and task capability bitmask."""
 from __future__ import annotations
 
+import csv
 import json
 import math
 import sqlite3
@@ -11,6 +12,14 @@ from pathlib import Path
 from typing import Any
 
 EARTH_RADIUS_M = 6_371_008.8
+STATE_FIELDS = [
+    "vehicle_id",
+    "window_start_timestamp",
+    "window_duration_s",
+    "velocity_mps",
+    "direction_degrees",
+    "task_capable_bit_integer",
+]
 
 
 def parse_timestamp(value: str) -> datetime:
@@ -86,17 +95,25 @@ class SharedCapabilityStore:
 class LiveGPSProcessor:
     """Maintains a time-based sliding window per vehicle and emits on cadence."""
     def __init__(self, settings: dict, capabilities: dict | None, output_path: Path,
-                 logger, registry_path: Path | None = None, database_path: Path | None = None):
+                 logger, registry_path: Path | None = None, database_path: Path | None = None,
+                 csv_output_path: Path | None = None):
         self.window_s = float(settings.get("window_duration_s", 10.0))
-        self.update_s = float(settings.get("update_interval_s", 2.0))
+        # stride_s is the distance in time between consecutive window starts.
+        # update_interval_s remains a backward-compatible alias.
+        self.stride_s = float(settings.get("stride_s", settings.get("update_interval_s", 2.0)))
+        self.update_s = self.stride_s
         self.max_gap_s = float(settings.get("max_fix_gap_s", 5.0))
         self.stationary_mps = float(settings.get("stationary_speed_threshold_mps", 0.5))
-        if self.window_s <= 0 or self.update_s <= 0 or self.window_s <= self.update_s:
-            raise ValueError("Require window_duration_s > update_interval_s > 0")
+        if self.window_s <= 0 or self.stride_s <= 0 or self.window_s <= self.stride_s:
+            raise ValueError("Require window_duration_s > stride_s > 0")
         self.history = defaultdict(deque)
         self.last_emit = {}
         self.output_path = Path(output_path)
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.csv_output_path = Path(csv_output_path) if csv_output_path else None
+        if self.csv_output_path:
+            self.csv_output_path.parent.mkdir(parents=True, exist_ok=True)
+        self._output_lock = threading.Lock()
         self.logger = logger
         self.database = SharedCapabilityStore(database_path) if database_path else None
         self.lock = threading.Lock()
@@ -181,16 +198,34 @@ class LiveGPSProcessor:
         return state
 
     def _write_state(self, state: dict) -> None:
-        with self.output_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(state, separators=(",", ":")) + "\n")
+        # Persist the exact same six-field record locally in JSONL and CSV.
+        with self._output_lock:
+            with self.output_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(state, separators=(",", ":")) + "\\n")
+            if self.csv_output_path:
+                new_file = (
+                    not self.csv_output_path.exists()
+                    or self.csv_output_path.stat().st_size == 0
+                )
+                with self.csv_output_path.open("a", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=STATE_FIELDS)
+                    if new_file:
+                        writer.writeheader()
+                    # Preserve null explicitly instead of making it an ambiguous blank cell.
+                    writer.writerow({
+                        key: ("null" if state[key] is None else state[key])
+                        for key in STATE_FIELDS
+                    })
+                    handle.flush()
         if self.database:
             self.database.save_vehicle_state(state)
 
 
 class ProcessingWorker(threading.Thread):
-    def __init__(self, records, processor: LiveGPSProcessor, logger):
+    def __init__(self, records, processor: LiveGPSProcessor, logger, output_sender=None):
         super().__init__(name="gps-preprocessor", daemon=True)
         self.records, self.processor, self.logger = records, processor, logger
+        self.output_sender = output_sender
         self.stop_event = threading.Event()
 
     def run(self):
@@ -202,6 +237,8 @@ class ProcessingWorker(threading.Thread):
             try:
                 state = self.processor.process(record)
                 if state is not None:
+                    if self.output_sender is not None:
+                        self.output_sender.submit(state)
                     self.logger.info(
                         "Processed %s | window_start=%s | duration=%ss | velocity=%s m/s | direction=%s deg | task_mask=%s",
                         state["vehicle_id"], state["window_start_timestamp"],
