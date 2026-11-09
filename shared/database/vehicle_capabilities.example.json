@@ -1,0 +1,9 @@
+{
+  "vehicles": [
+    {
+      "vehicle_id": "REPLACE_WITH_COMPONENT1_DEVICE_ID",
+      "devices": ["camera", "gps"],
+      "description": "Example vehicle inventory; replace this ID with a real registered fleet ID"
+    }
+  ]
+}
