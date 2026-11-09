@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Component 2 Processed Vehicle State for Component 3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "vehicle_id",
+    "window_start_timestamp",
+    "window_duration_s",
+    "velocity_mps",
+    "direction_degrees",
+    "task_capable_bit_integer"
+  ],
+  "properties": {
+    "vehicle_id": {"type": "string", "minLength": 1},
+    "window_start_timestamp": {"type": "string", "format": "date-time"},
+    "window_duration_s": {"type": "number", "minimum": 0},
+    "velocity_mps": {"type": ["number", "null"], "minimum": 0},
+    "direction_degrees": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "exclusiveMaximum": 360
+    },
+    "task_capable_bit_integer": {"type": "integer", "minimum": 0}
+  }
+}
