@@ -145,14 +145,14 @@ def test_two_second_stride_keeps_ten_second_sliding_window_and_writes_csv(tmp_pa
         if state is not None:
             emitted.append(state)
 
-    # t=0 is the immediate first-fix record; thereafter the configured stride is 2s.
-    assert [int(item["window_start_timestamp"][-2:]) +
-            int(item["window_duration_s"]) for item in emitted[:2]] == [0, 2]
+    # t=0 is the immediate first-fix record. Then states emit every 2s.
     assert len(emitted) == 7
-    assert [int(item["window_start_timestamp"][-2:]) for item in emitted] == [
-        0, 0, 0, 0, 0, 0, 2
+    assert [item["window_duration_s"] for item in emitted] == [
+        0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 10.0
     ]
-    assert emitted[-1]["window_duration_s"] == 10.0
+    assert [item["window_start_timestamp"][-2:] for item in emitted] == [
+        "00", "00", "00", "00", "00", "00", "02"
+    ]
 
     with csv_path.open("r", newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
