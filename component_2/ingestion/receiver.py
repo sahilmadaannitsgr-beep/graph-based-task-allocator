@@ -196,23 +196,20 @@ def run_receiver(config: dict, root: Path, logger: logging.Logger,
     processing_output = resolve_path(
         root, processing.get("output_file", "data/processed/vehicle_states.jsonl")
     )
-    capabilities_path = resolve_path(
-        root, processing.get("capabilities_file", "capabilities.json")
-    )
-    if capabilities_path.exists():
-        with capabilities_path.open("r", encoding="utf-8") as f:
-            capabilities = json.load(f)
-    else:
-        capabilities = {"vehicle_capabilities": {}, "task_requirements": {}}
-        logger.warning("Capabilities file not found; task compatibility will be marked unknown")
     registration = config.get("registration", {})
-    registry_path = (
-        resolve_path(root, registration.get("registry_file", "registration/data/vehicle_registry.json"))
+    database_path = (
+        resolve_path(root, registration.get("database_path", "../shared/database/project.db"))
         if registration.get("enabled", True) else None
     )
+    if registration.get("enabled", True) and (database_path is None or not database_path.exists()):
+        logger.warning(
+            "Shared project database not found at %s; task capability masks will be zero. "
+            "Run shared/database/seed_database.py first.",
+            database_path
+        )
     processor = LiveGPSProcessor(
-        processing, capabilities, processing_output, logger,
-        registry_path=registry_path
+        processing, None, processing_output, logger,
+        database_path=database_path
     )
     processor_worker = ProcessingWorker(processing_queue, processor, logger)
     processor_worker.start()
