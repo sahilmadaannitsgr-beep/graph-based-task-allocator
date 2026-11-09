@@ -77,3 +77,6 @@ component_2/data
 shared/database/*.db
 shared/database/*.db-shm
 shared/database/*.db-wal
+
+# Component 3 receiver outputs (generated locally)
+component_3/data/
