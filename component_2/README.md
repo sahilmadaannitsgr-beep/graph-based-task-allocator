@@ -1,302 +1,202 @@
-# Component 2 — Live GPS Receiver, Vehicle Registration & Capability Preprocessor
+# Component 2 — GPS Sliding-Window Features and Task Capability
 
-Component 2 receives Component 1's live GPS stream over Server-Sent Events
-(SSE), archives the raw observations, estimates each vehicle's movement,
-maintains the IoT inventory reported by vehicle-side agents, and computes
-task compatibility. Component 2 does **not** allocate tasks; Component 3
-owns allocation.
+Component 2 consumes Component 1's existing SSE GPS stream, archives raw observations,
+maintains a per-vehicle sliding window, reads registered vehicle device inventory and
+task requirements from the project-wide shared database, and emits a compact record
+for Component 3.
 
-## End-to-end architecture
+Component 1's public GPS contract remains exactly
+`device_id, timestamp, latitude, longitude`. Component 2 maps `device_id` to
+`vehicle_id` internally. Component 2 does not infer installed IoT devices from GPS.
 
-```text
-Component 1 simulator
-      | SSE / HTTP (GPS JSON batches)
-      v
-Component 2 ingestion receiver ------------------> raw GPS CSV
-      |
-      v
-per-vehicle sliding-window GPS processor
-      |                          ^
-      |                          | live vehicle/task masks
-      v                          |
-vehicle_states.jsonl       registration/data/vehicle_registry.json
-                                 ^
-                                 |
-                   Component 2 registration API
-                                 ^
-                                 | authenticated JSON inventory
-                                 |
-                      vehicle-side registration agent
+## Output contract
 
-Admin registers task requirements through the registration API.
+Each JSONL record contains exactly these six fields:
+
+```json
+{
+  "vehicle_id": "dev_example",
+  "window_start_timestamp": "2026-01-01T07:00:00",
+  "window_duration_s": 10.0,
+  "velocity_mps": 8.42,
+  "direction_degrees": 87.3,
+  "task_capable_bit_integer": 5
+}
 ```
 
-## Package layout
+- `window_start_timestamp`: timestamp of the first GPS fix retained in the current window.
+- `window_duration_s`: actual elapsed time between the first and last fixes used.
+- `velocity_mps`: net displacement divided by elapsed window time.
+- `direction_degrees`: first-to-last bearing clockwise from north (0° north, 90° east).
+- `task_capable_bit_integer`: bitwise OR of all compatible task bits.
+
+**First-fix rule:** the first GPS observation for a vehicle is emitted with
+`velocity_mps=null` and `direction_degrees=null`. These remain null until a
+second usable, time-separated GPS position is available. An excessive GPS gap
+also leaves both motion values null. Direction remains null below the stationary
+movement threshold.
+
+## Sliding-window configuration
+
+The values from the existing Component 2 configuration are preserved:
+
+| Setting | Value |
+|---|---:|
+| `window_duration_s` | 10.0 |
+| `update_interval_s` | 2.0 |
+| `max_fix_gap_s` | 5.0 |
+| `stationary_speed_threshold_mps` | 0.5 |
+
+The window is maintained independently for each vehicle and emitted at the configured
+update cadence.
+
+## Shared database
+
+The schema is at the project root, outside Component 1:
 
 ```text
-component_2/
-├── stream_receiver.py
-├── receiver_config.json
-├── capabilities.json                 # optional fallback masks
-├── ingestion/                        # Component 1 SSE client + CSV archive
-├── processing/                       # GPS mobility + bitmask compatibility
-├── registration/
-│   ├── app.py                         # FastAPI registration/task API
-│   ├── provision_vehicle.py            # creates per-vehicle credentials
-│   ├── requirements.txt
-│   └── data/
-│       ├── vehicle_registry.json       # canonical live registry
-│       └── vehicle_tokens.json         # SHA-256 token hashes
-├── vehicle_agent/
-│   ├── vehicle_agent.py                # vehicle-side client agent
-│   ├── device_config.json
-│   └── requirements.txt
-├── data/                               # raw and processed outputs
-├── logs/
-└── tests/
+shared/
+  schema/database_schema.sql
+  schema/gps_observation.schema.json
+  schema/component2_vehicle_state.schema.json
+  database/db_utils.py
+  database/seed_database.py
+  database/import_vehicle_capabilities.py
+  database/vehicle_capabilities.example.json
 ```
 
-## 1. Requirements
+Tables include `device_types`, `vehicles`, `vehicle_devices`, `tasks`,
+`task_device_requirements`, and `vehicle_states`. Device and task bit positions
+are zero-based, permanent, and never shifted or reused.
 
-- Python 3.10+
-- Registration API: FastAPI + Uvicorn
-- Vehicle agent: Requests
-- GPS receiver and preprocessing: Python standard library
+A vehicle is compatible with a task when:
 
-Install registration API dependencies:
+```python
+(vehicle_devices_bit_integer & devices_need_bit_integer) == devices_need_bit_integer
+```
+
+The task capability mask is the OR of the `task_bit_integer` values for all compatible
+tasks. Unknown vehicle IDs receive mask 0; no device inventory is invented for them.
+
+## Setup and run
+
+Python 3.10+.
+
+### 1. Initialize/populate the shared database
+
+Run from the repository root:
+
+```bash
+python shared/database/seed_database.py
+```
+
+This creates `shared/database/project.db`, seeds starter device/task mappings, and
+imports existing registered vehicles from the previous Component 2 JSON registry
+when present. The seed is idempotent and preserves existing bit IDs.
+
+### 2. Start the Component 2 registration API
+
+From the repository root:
+
+```bash
+export COMPONENT2_ADMIN_TOKEN="replace-with-a-long-random-secret"
+cd component_2/registration
+pip install -r requirements.txt
+uvicorn app:app --host 127.0.0.1 --port 8001
+```
+
+PowerShell:
+
+```powershell
+$env:COMPONENT2_ADMIN_TOKEN="replace-with-a-long-random-secret"
+cd component_2/registration
+pip install -r requirements.txt
+uvicorn app:app --host 127.0.0.1 --port 8001
+```
+
+API docs: `http://127.0.0.1:8001/docs`. All task/device/fleet administration
+requires the admin token.
+
+### 3. Provision and register a vehicle
 
 ```bash
 cd component_2/registration
-pip install -r requirements.txt
-```
-
-Install vehicle agent dependencies separately on the vehicle-side machine:
-
-```bash
-cd component_2/vehicle_agent
-pip install -r requirements.txt
-```
-
-## 2. Start the Component 2 registration API
-
-This API receives vehicle inventories and task definitions. It stores the
-canonical registry in `registration/data/vehicle_registry.json`.
-
-From `component_2/registration`:
-
-Windows PowerShell:
-```powershell
-$env:COMPONENT2_ADMIN_TOKEN="set-a-long-admin-secret"
-uvicorn app:app --host 0.0.0.0 --port 8001
-```
-
-macOS/Linux:
-```bash
-export COMPONENT2_ADMIN_TOKEN="set-a-long-admin-secret"
-uvicorn app:app --host 0.0.0.0 --port 8001
-```
-
-Keep this process running. API docs are at `http://127.0.0.1:8001/docs`.
-For separate machines, use the server's LAN address instead of localhost
-in the vehicle agent config and allow TCP port 8001 through the firewall.
-
-## 3. Provision each vehicle identity
-
-Every vehicle must have a stable vehicle ID and its own credential. Run this
-once per vehicle from `component_2/registration`:
-
-```bash
 python provision_vehicle.py dev_d3dc3bcc773f
 ```
 
-Copy the generated token into that vehicle's `vehicle_agent/device_config.json`.
-The server stores only the token's SHA-256 hash. The token is printed once;
-if lost, provision a replacement and revoke the old hash from
-`registration/data/vehicle_tokens.json`.
+Copy the one-time token into `component_2/vehicle_agent/device_config.json`.
+The repository sample contains a placeholder; do not commit real vehicle tokens.
+The `vehicle_id` must match Component 1's `device_id`.
 
-**Identity contract:** The `vehicle_id` reported by the vehicle agent must
-equal the `device_id` in Component 1's GPS observations. Your current GPS
-sample uses IDs such as `dev_d3dc3bcc773f`, so use that exact ID in the
-vehicle agent config. If your real vehicle has a separate fleet ID, add an
-explicit mapping layer rather than assuming the IDs are interchangeable.
-
-## 4. Configure and run the vehicle-side agent
-
-Edit `vehicle_agent/device_config.json`:
-
-```json
-{
-  "vehicle_id": "dev_d3dc3bcc773f",
-  "server_url": "http://127.0.0.1:8001",
-  "api_token": "PASTE_THE_PROVISIONED_TOKEN_HERE",
-  "heartbeat_interval_s": 300,
-  "devices": [
-    {"type": "camera", "enabled": true, "source": "configured"},
-    {"type": "gps", "enabled": true, "source": "configured"},
-    {"type": "rfid", "enabled": false, "source": "configured"}
-  ]
-}
-```
-
-One-time registration:
+On the vehicle-side host:
 
 ```bash
 cd component_2/vehicle_agent
+pip install -r requirements.txt
 python vehicle_agent.py --once
 ```
 
-Continuous startup registration + periodic refresh/heartbeat:
+The included inventory adapter reads configured devices. Add platform/vendor hardware
+discovery adapters where actual automatic detection is required.
 
-```bash
-python vehicle_agent.py
-```
+### 4. Add task definitions
 
-When the inventory changes, update the vehicle-side config or discovery
-adapter. The next registration replaces the server's latest inventory for
-that vehicle. The server keeps one current inventory per vehicle ID.
-
-### Hardware discovery and real-world adaptation
-
-The included `discover_devices()` currently reads the explicit inventory
-from `device_config.json`. There is no universal cross-platform Python
-mechanism that reliably detects all automotive IoT hardware. For actual
-automatic detection, implement hardware-specific adapters in that function:
-USB/serial device enumeration, Linux device paths, CAN/OBD interfaces,
-camera SDKs, vendor APIs, or sensor drivers. Report a device only when its
-adapter confirms it is installed and available. Manual app selection can
-remain as a fallback. Keep device type names stable and lowercase
-(`camera`, `gps`, `temperature_sensor`, `rfid`, etc.).
-
-## 5. Register task requirements
-
-Task management is protected by the admin token. Open
-`http://127.0.0.1:8001/docs`, select `POST /api/v1/tasks`, and provide:
-
-```json
-{
-  "task_id": "inspection",
-  "required_devices": ["camera", "gps"]
-}
-```
-
-Or use curl:
+Use the admin-protected `POST /api/v1/tasks` endpoint (Swagger UI or curl):
 
 ```bash
 curl -X POST http://127.0.0.1:8001/api/v1/tasks \
   -H "Content-Type: application/json" \
-  -H "X-Admin-Token: set-a-long-admin-secret" \
+  -H "X-Admin-Token: replace-with-a-long-random-secret" \
   -d '{"task_id":"inspection","required_devices":["camera","gps"]}'
 ```
 
-Device types receive stable power-of-two bit values when first registered.
-The same device type always keeps the same bit in the canonical registry.
-A vehicle mask is the bitwise OR of its installed device bits. A task mask
-is the OR of its required device bits.
+New task/device types receive the next unused bit position. Updating a task preserves
+its existing task bit position.
 
-Compatibility uses the exact subset condition:
+### 5. Start Component 1 and Component 2
 
-```python
-(vehicle_mask & task_required_mask) == task_required_mask
-```
-
-The empty task requirement mask matches all registered vehicles; define
-at least one required device for ordinary tasks.
-
-## 6. Inspect the registration registry
-
-- `GET /api/v1/vehicles` — requires `X-Admin-Token`; current inventory and mask.
-- `GET /api/v1/tasks` — requires `X-Admin-Token`; task masks.
-- `GET /api/v1/compatibility` — requires `X-Admin-Token`; all vehicle/task matches.
-- `GET /api/v1/vehicles/{vehicle_id}/compatible-tasks` — requires admin token.
-- `GET /health` — API health.
-
-Canonical registry file:
-`registration/data/vehicle_registry.json`
-
-## 7. Start the live GPS receiver
-
-Start Component 1 first, using its existing startup command. Then, from
-`component_2`, run:
+Start Component 1 using its existing stream command:
 
 ```bash
+cd component_1
+python run_stream_server.py --host 127.0.0.1 --port 8765 --duration 0
+```
+
+Then start Component 2:
+
+```bash
+cd component_2
 python stream_receiver.py --config receiver_config.json
 ```
 
-Default Component 1 SSE endpoint:
-`http://127.0.0.1:8765/gps/stream`
+Outputs:
+- Raw GPS: `component_2/data/received/x/received_gps.csv`
+- Component 3 JSONL: `component_2/data/processed/vehicle_states.jsonl`
+- Shared SQLite DB: `shared/database/project.db`
+- Receiver log: `component_2/logs/receiver.log`
 
-Override if needed:
+### 6. Optional bulk inventory import
 
-```bash
-python stream_receiver.py --config receiver_config.json \
-  --url http://127.0.0.1:8765/gps/stream
-```
-
-The receiver accepts:
-- SSE JSON batches containing an `observations` array.
-- Individual SSE JSON records with exactly `device_id`, `timestamp`,
-  `latitude`, and `longitude`.
-- `complete` and `error` control messages.
-
-## 8. Dynamic integration: vehicle registry → GPS processor
-
-The GPS processor reads `registration/data/vehicle_registry.json` and
-checks its modification time. When a vehicle reports new devices or an
-admin changes task requirements, the processor reloads masks automatically
-on subsequent GPS processing. It does not require exporting a second
-capabilities file or restarting the receiver.
-
-`capabilities.json` remains as a fallback for deployments that disable the
-registration integration. When registration is enabled (default), the
-canonical live registry is authoritative.
-
-## 9. Component 2 GPS processing
-
-Default settings in `receiver_config.json`:
-
-| Setting | Default | Meaning |
-|---|---:|---|
-| `window_duration_s` | 10 | Sliding GPS history per vehicle |
-| `update_interval_s` | 2 | Minimum time between emitted states per vehicle |
-| `max_fix_gap_s` | 5 | Larger adjacent GPS gaps invalidate motion |
-| `stationary_speed_threshold_mps` | 0.5 | Below this path speed, label stationary |
-
-Direction is the first-to-last displacement bearing, clockwise from north.
-`velocity_mps` is net displacement / elapsed time; `speed_mps` is total
-path distance / elapsed time. Coordinates are WGS84 latitude/longitude.
-At least two time-separated fixes for the same `device_id` are required.
-The first output for a newly observed vehicle can therefore have null
-movement fields and `motion_quality="insufficient_fixes"`.
-
-## 10. Outputs
-
-- Raw GPS CSV: `data/received/x/received_gps.csv`
-- Processed vehicle states: `data/processed/vehicle_states.jsonl`
-- Receiver logs: `logs/receiver.log`
-- Canonical vehicle/task registry: `registration/data/vehicle_registry.json`
-
-`vehicle_states.jsonl` includes vehicle ID, observation timestamp/count,
-capability-known flag, vehicle mask, compatible task IDs, direction,
-bearing, velocity, speed, displacement and motion-quality status.
-
-## 11. Run tests
-
-From `component_2`:
+Copy and edit `shared/database/vehicle_capabilities.example.json`, then:
 
 ```bash
-pip install pytest
-python -m pytest -q
+python shared/database/import_vehicle_capabilities.py --input shared/database/my_vehicle_capabilities.json
 ```
 
-## 12. Security and deployment notes
+This uses only approved backend inventory data, not GPS inference.
 
-This is a local development integration, not a fully hardened production
-fleet service. Before real deployment:
-- Put both APIs behind HTTPS/TLS.
-- Replace JSON-file storage with a transactional database (e.g. PostgreSQL).
-- Keep the admin token secret and rotate it; provision unique per-vehicle tokens.
-- Restrict task-management and fleet-query endpoints to authorized admins.
-- Add device attestation/allowlisting if vehicle inventory reports are security-sensitive.
-- Add replay/recovery to the SSE producer if missed batches must be recovered.
-- Add offline queueing on the vehicle agent if it must survive long outages.
-- Implement and test real hardware discovery adapters on the target vehicle OS.
+## Tests
+
+From the repository root:
+
+```bash
+python -m pip install pytest
+python -m pytest component_2/tests -q
+```
+
+## Deployment note
+
+SQLite is suitable for local same-machine development. When components run on separate
+machines, use a shared PostgreSQL database and configure each component to use the same
+database service. Protect the registry API with HTTPS/TLS and keep the admin token and
+vehicle credentials private.
