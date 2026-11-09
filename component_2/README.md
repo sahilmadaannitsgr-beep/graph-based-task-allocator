@@ -200,3 +200,94 @@ SQLite is suitable for local same-machine development. When components run on se
 machines, use a shared PostgreSQL database and configure each component to use the same
 database service. Protect the registry API with HTTPS/TLS and keep the admin token and
 vehicle credentials private.
+
+
+## 10. Window duration versus stride
+
+The configured window length is **10 seconds** and the configured stride is
+**2 seconds**. The stride is the elapsed time between consecutive output windows,
+not the amount of GPS history retained.
+
+After warm-up, an example for one vehicle is:
+
+| Emission | Window |
+|---|---|
+| 1 | 00–10 s |
+| 2 | 02–12 s |
+| 3 | 04–14 s |
+| 4 | 06–16 s |
+
+Those windows overlap by 8 seconds. At startup, Component 2 emits the first
+observation immediately (with null velocity and direction), then partial windows
+during warm-up. Once 10 seconds of history is available, each new window spans
+10 seconds and advances by 2 seconds. The active settings are `window_duration_s=10`
+and `stride_s=2`. The older `update_interval_s` configuration key remains a
+backward-compatible alias for `stride_s`.
+
+## 11. Send processed states to Component 3
+
+Component 2 starts its HTTP sender automatically when
+`component3.enabled=true` in `receiver_config.json`. It sends one HTTP POST for
+each emitted vehicle state to:
+
+```text
+POST http://127.0.0.1:8002/api/v1/vehicle-states
+```
+
+The JSON request body contains exactly the six fields in the output contract.
+No raw GPS coordinates, device inventory, or extra diagnostic fields are sent
+to Component 3.
+
+The sender uses a durable local outbox. If Component 3 is offline, records remain
+in `data/processed/component3_outbox.jsonl` and are retried. Component 3 sends
+an accepted response; only then is that record removed from the outbox. The
+sender adds an `Idempotency-Key` HTTP header so Component 3 can ignore retries
+of an already accepted record. The request body itself remains the six-field
+payload.
+
+### Start Component 3 first
+
+Open a separate PowerShell terminal:
+
+```powershell
+cd component_3
+python -m pip install -r requirements.txt
+uvicorn app:app --host 127.0.0.1 --port 8002
+```
+
+Check it:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8002/health
+```
+
+Then start Component 1 and Component 2 as described above. Component 2's sender
+will connect automatically; no manual sender command is needed.
+
+### Local files
+
+Component 2 stores the exact six fields it sends in:
+
+- `component_2/data/processed/vehicle_states.jsonl`
+- `component_2/data/processed/vehicle_states.csv`
+
+Pending Component 3 deliveries are held in:
+
+- `component_2/data/processed/component3_outbox.jsonl`
+
+Component 3 stores successfully received records in:
+
+- `component_3/data/received/vehicle_states.csv`
+- `component_3/data/received/component3_receiver.sqlite3`
+
+The Component 3 receiver validates that requests contain exactly the six
+contract fields. The SQLite store provides idempotent receipt handling, and
+the CSV is rebuilt from that store.
+
+## 12. Run tests
+
+From the repository root:
+
+```powershell
+python -m pytest component_2/tests component_3/tests -q
+```
