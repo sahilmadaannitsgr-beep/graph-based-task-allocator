@@ -1,26 +1,29 @@
-"""Live per-vehicle GPS mobility and IoT-task compatibility processing."""
+"""Per-vehicle sliding-window GPS features and task capability bitmask."""
 from __future__ import annotations
 
 import json
 import math
+import sqlite3
 import threading
-import time
 from collections import defaultdict, deque
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 EARTH_RADIUS_M = 6_371_008.8
 
+
 def parse_timestamp(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
 
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp = math.radians(lat2 - lat1)
-    dl = math.radians(lon2 - lon1)
+    dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
     a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
     return 2 * EARTH_RADIUS_M * math.asin(min(1.0, math.sqrt(a)))
+
 
 def initial_bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     p1, p2 = math.radians(lat1), math.radians(lat2)
@@ -29,125 +32,125 @@ def initial_bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> f
     x = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
     return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
 
-def direction_label(bearing: float) -> str:
-    names = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
-    return names[int((bearing + 22.5) // 45) % 8]
 
-def compatible_tasks(vehicle_mask: int, requirements: dict[str, int]) -> list[str]:
-    if isinstance(vehicle_mask, bool) or not isinstance(vehicle_mask, int) or vehicle_mask < 0:
-        raise ValueError("vehicle capability mask must be a non-negative integer")
-    matched = []
-    for task_id, required in requirements.items():
-        if isinstance(required, bool) or not isinstance(required, int) or required < 0:
-            raise ValueError(f"task mask for {task_id} must be a non-negative integer")
-        if (vehicle_mask & required) == required:
-            matched.append(task_id)
-    return sorted(matched)
+class SharedCapabilityStore:
+    """Reads vehicle and task bitmasks and persists the six-field output record."""
+    def __init__(self, db_path: Path):
+        self.db_path = Path(db_path)
+
+    def get_task_capable_bit_integer(self, vehicle_id: str) -> int:
+        if not self.db_path.exists():
+            return 0
+        conn = sqlite3.connect(self.db_path, timeout=10)
+        try:
+            row = conn.execute(
+                "SELECT devices_bit_integer FROM vehicles WHERE vehicle_id=?",
+                (vehicle_id,)
+            ).fetchone()
+            if row is None:
+                return 0
+            vehicle_mask = int(row[0])
+            tasks = conn.execute(
+                "SELECT task_bit_integer, devices_need_bit_integer FROM tasks WHERE active=1"
+            ).fetchall()
+            result = 0
+            for task_bit, required_mask in tasks:
+                required_mask = int(required_mask)
+                if (vehicle_mask & required_mask) == required_mask:
+                    result |= int(task_bit)
+            return result
+        finally:
+            conn.close()
+
+    def save_vehicle_state(self, state: dict) -> None:
+        if not self.db_path.exists():
+            return
+        conn = sqlite3.connect(self.db_path, timeout=10)
+        try:
+            conn.execute(
+                """INSERT INTO vehicle_states
+                   (vehicle_id, window_start_timestamp, window_duration_s,
+                    velocity_mps, direction_degrees, task_capable_bit_integer)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    state["vehicle_id"], state["window_start_timestamp"],
+                    state["window_duration_s"], state["velocity_mps"],
+                    state["direction_degrees"], state["task_capable_bit_integer"]
+                )
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
 
 class LiveGPSProcessor:
-    """Consumes validated GPS records and emits one state per vehicle on cadence."""
-    def __init__(self, settings: dict, capabilities: dict, output_path: Path, logger,
-                 registry_path: Path | None = None):
+    """Maintains a time-based sliding window per vehicle and emits on cadence."""
+    def __init__(self, settings: dict, capabilities: dict | None, output_path: Path,
+                 logger, registry_path: Path | None = None, database_path: Path | None = None):
         self.window_s = float(settings.get("window_duration_s", 10.0))
         self.update_s = float(settings.get("update_interval_s", 2.0))
         self.max_gap_s = float(settings.get("max_fix_gap_s", 5.0))
         self.stationary_mps = float(settings.get("stationary_speed_threshold_mps", 0.5))
         if self.window_s <= 0 or self.update_s <= 0 or self.window_s <= self.update_s:
             raise ValueError("Require window_duration_s > update_interval_s > 0")
-        self.vehicle_masks = capabilities.get("vehicle_capabilities", {})
-        self.task_requirements = capabilities.get("task_requirements", {})
-        self.registry_path = registry_path
-        self._registry_mtime_ns = None
         self.history = defaultdict(deque)
         self.last_emit = {}
-        self.output_path = output_path
-        self.logger = logger
-        self._reload_registry_if_changed(force=True)
-        self.lock = threading.Lock()
+        self.output_path = Path(output_path)
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    def _reload_registry_if_changed(self, force: bool = False) -> None:
-        """Refresh vehicle/task masks from the live registration service's JSON store."""
-        if self.registry_path is None or not self.registry_path.exists():
-            return
-        try:
-            mtime_ns = self.registry_path.stat().st_mtime_ns
-            if not force and mtime_ns == self._registry_mtime_ns:
-                return
-            with self.registry_path.open("r", encoding="utf-8") as handle:
-                registry = json.load(handle)
-            vehicles = registry.get("vehicles", {})
-            tasks = registry.get("tasks", {})
-            self.vehicle_masks = {
-                vehicle_id: int(item["capability_mask"])
-                for vehicle_id, item in vehicles.items()
-            }
-            self.task_requirements = {
-                task_id: int(item["required_mask"])
-                for task_id, item in tasks.items()
-            }
-            self._registry_mtime_ns = mtime_ns
-            self.logger.info(
-                "Reloaded live capability registry: %d vehicles, %d tasks",
-                len(self.vehicle_masks), len(self.task_requirements)
-            )
-        except (OSError, ValueError, KeyError, TypeError):
-            self.logger.exception("Could not reload capability registry; retaining last valid masks")
+        self.logger = logger
+        self.database = SharedCapabilityStore(database_path) if database_path else None
+        self.lock = threading.Lock()
 
     def process(self, record: dict[str, Any]) -> dict | None:
-        device_id = record["device_id"]
-        timestamp = parse_timestamp(record["timestamp"])
+        # Component 1 sends device_id; Component 2 names the same identity vehicle_id.
+        vehicle_id = record.get("vehicle_id", record.get("device_id"))
+        if not isinstance(vehicle_id, str) or not vehicle_id.strip():
+            raise ValueError("GPS record must contain a non-empty device_id")
+        timestamp_text = str(record["timestamp"])
+        timestamp = parse_timestamp(timestamp_text)
+        latitude, longitude = float(record["latitude"]), float(record["longitude"])
+        if not math.isfinite(latitude) or not -90 <= latitude <= 90:
+            raise ValueError("Invalid latitude")
+        if not math.isfinite(longitude) or not -180 <= longitude <= 180:
+            raise ValueError("Invalid longitude")
         fix = {
-            "timestamp": timestamp,
-            "timestamp_text": record["timestamp"],
-            "latitude": float(record["latitude"]),
-            "longitude": float(record["longitude"]),
+            "timestamp": timestamp, "timestamp_text": timestamp_text,
+            "latitude": latitude, "longitude": longitude
         }
+
         with self.lock:
-            points = self.history[device_id]
+            points = self.history[vehicle_id]
             if points and timestamp <= points[-1]["timestamp"]:
-                self.logger.warning("Ignoring out-of-order/duplicate fix for %s", device_id)
+                self.logger.warning("Ignoring out-of-order/duplicate fix for %s", vehicle_id)
                 return None
             points.append(fix)
-            while len(points) > 1:
-                age = (timestamp - points[0]["timestamp"]).total_seconds()
-                if age <= self.window_s:
-                    break
+            while len(points) > 1 and (timestamp - points[0]["timestamp"]).total_seconds() > self.window_s:
                 points.popleft()
-
-            previous_emit = self.last_emit.get(device_id)
-            elapsed_since_emit = (
-                (timestamp - previous_emit).total_seconds() if previous_emit else None
-            )
-            if previous_emit is not None and elapsed_since_emit < self.update_s:
+            previous_emit = self.last_emit.get(vehicle_id)
+            if previous_emit is not None and (timestamp - previous_emit).total_seconds() < self.update_s:
                 return None
-            self.last_emit[device_id] = timestamp
+            self.last_emit[vehicle_id] = timestamp
             snapshot = list(points)
 
-        state = self._build_state(device_id, snapshot)
+        state = self._build_state(vehicle_id, snapshot)
         self._write_state(state)
         return state
 
-    def _build_state(self, device_id: str, points: list[dict]) -> dict:
-        self._reload_registry_if_changed()
-        vehicle_mask = self.vehicle_masks.get(device_id)
-        capability_known = vehicle_mask is not None
-        tasks = compatible_tasks(int(vehicle_mask), self.task_requirements) if capability_known else []
+    def _build_state(self, vehicle_id: str, points: list[dict]) -> dict:
+        task_mask = self.database.get_task_capable_bit_integer(vehicle_id) if self.database else 0
+        elapsed = max(
+            0.0,
+            (points[-1]["timestamp"] - points[0]["timestamp"]).total_seconds()
+        )
+        # First observation is emitted for the vehicle, but motion is unknown:
+        # both velocity and direction remain null until a second usable fix exists.
         state = {
-            "device_id": device_id,
-            "observed_at": points[-1]["timestamp_text"],
-            "observation_count": len(points),
-            "window_duration_s": self.window_s,
-            "capability_known": capability_known,
-            "vehicle_iot_mask": int(vehicle_mask) if capability_known else None,
-            "compatible_tasks": tasks,
-            "motion_available": False,
+            "vehicle_id": vehicle_id,
+            "window_start_timestamp": points[0]["timestamp_text"],
+            "window_duration_s": elapsed,
             "velocity_mps": None,
-            "speed_mps": None,
-            "direction": None,
-            "bearing_deg": None,
-            "displacement_m": None,
-            "motion_quality": "insufficient_fixes",
+            "direction_degrees": None,
+            "task_capable_bit_integer": int(task_mask)
         }
         if len(points) < 2:
             return state
@@ -156,13 +159,7 @@ class LiveGPSProcessor:
             (points[i]["timestamp"] - points[i - 1]["timestamp"]).total_seconds()
             for i in range(1, len(points))
         ]
-        if any(gap <= 0 or gap > self.max_gap_s for gap in gaps):
-            state["motion_quality"] = "gap_exceeds_limit"
-            return state
-
-        elapsed = (points[-1]["timestamp"] - points[0]["timestamp"]).total_seconds()
-        if elapsed <= 0:
-            state["motion_quality"] = "invalid_elapsed_time"
+        if any(gap <= 0 or gap > self.max_gap_s for gap in gaps) or elapsed <= 0:
             return state
 
         first, last = points[0], points[-1]
@@ -173,35 +170,27 @@ class LiveGPSProcessor:
             haversine_m(a["latitude"], a["longitude"], b["latitude"], b["longitude"])
             for a, b in zip(points, points[1:])
         )
+        velocity = displacement / elapsed
+        path_speed = path_distance / elapsed
         bearing = initial_bearing_deg(
             first["latitude"], first["longitude"], last["latitude"], last["longitude"]
         )
-        velocity = displacement / elapsed
-        speed = path_distance / elapsed
-        state.update({
-            "motion_available": True,
-            "velocity_mps": round(velocity, 3),
-            "speed_mps": round(speed, 3),
-            "direction": direction_label(bearing) if displacement >= 0.5 else "STATIONARY",
-            "bearing_deg": round(bearing, 1) if displacement >= 0.5 else None,
-            "displacement_m": round(displacement, 2),
-            "motion_quality": "ok",
-        })
-        if speed < self.stationary_mps:
-            state["direction"] = "STATIONARY"
-            state["bearing_deg"] = None
+        state["velocity_mps"] = round(velocity, 3)
+        if displacement >= 0.5 and path_speed >= self.stationary_mps:
+            state["direction_degrees"] = round(bearing, 2)
         return state
 
-    def _write_state(self, state: dict):
-        with self.output_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(state, separators=(",", ":")) + "\\n")
+    def _write_state(self, state: dict) -> None:
+        with self.output_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(state, separators=(",", ":")) + "\n")
+        if self.database:
+            self.database.save_vehicle_state(state)
+
 
 class ProcessingWorker(threading.Thread):
     def __init__(self, records, processor: LiveGPSProcessor, logger):
         super().__init__(name="gps-preprocessor", daemon=True)
-        self.records = records
-        self.processor = processor
-        self.logger = logger
+        self.records, self.processor, self.logger = records, processor, logger
         self.stop_event = threading.Event()
 
     def run(self):
@@ -214,12 +203,16 @@ class ProcessingWorker(threading.Thread):
                 state = self.processor.process(record)
                 if state is not None:
                     self.logger.info(
-                        "Processed %s | tasks=%s | direction=%s | velocity=%s m/s | quality=%s",
-                        state["device_id"], state["compatible_tasks"], state["direction"],
-                        state["velocity_mps"], state["motion_quality"]
+                        "Processed %s | window_start=%s | duration=%ss | velocity=%s m/s | direction=%s deg | task_mask=%s",
+                        state["vehicle_id"], state["window_start_timestamp"],
+                        state["window_duration_s"], state["velocity_mps"],
+                        state["direction_degrees"], state["task_capable_bit_integer"]
                     )
             except Exception:
-                self.logger.exception("GPS preprocessing failed for %s", record.get("device_id"))
+                self.logger.exception(
+                    "GPS preprocessing failed for %s",
+                    record.get("device_id", record.get("vehicle_id"))
+                )
             finally:
                 self.records.task_done()
 
