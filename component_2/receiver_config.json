@@ -12,7 +12,12 @@
   "receiver": {
     "queue_max_records": 50000,
     "validate_gps_schema": true,
-    "expected_fields": ["device_id", "timestamp", "latitude", "longitude"],
+    "expected_fields": [
+      "device_id",
+      "timestamp",
+      "latitude",
+      "longitude"
+    ],
     "detect_batch_gaps": true,
     "drop_invalid_records": true
   },
@@ -24,11 +29,12 @@
   },
   "processing": {
     "forward_to_queue": true,
-    "window_duration_s": 10.0,
-    "update_interval_s": 2.0,
-    "max_fix_gap_s": 5.0,
+    "window_duration_s": 10,
+    "max_fix_gap_s": 5,
     "stationary_speed_threshold_mps": 0.5,
-    "output_file": "data/processed/vehicle_states.jsonl"
+    "output_file": "data/processed/vehicle_states.jsonl",
+    "stride_s": 2,
+    "output_csv_file": "data/processed/vehicle_states.csv"
   },
   "logging": {
     "level": "INFO",
@@ -37,5 +43,13 @@
   "registration": {
     "enabled": true,
     "database_path": "../shared/database/project.db"
+  },
+  "component3": {
+    "enabled": true,
+    "receiver_url": "http://127.0.0.1:8002/api/v1/vehicle-states",
+    "timeout_s": 5,
+    "retry_initial_delay_s": 1,
+    "retry_max_delay_s": 30,
+    "outbox_file": "data/processed/component3_outbox.jsonl"
   }
 }
