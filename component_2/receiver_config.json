@@ -1,0 +1,32 @@
+{
+  "connection": {
+    "protocol": "sse",
+    "server_url": "http://127.0.0.1:8765/gps/stream",
+    "connect_timeout_s": 10,
+    "read_timeout_s": 75,
+    "reconnect_enabled": true,
+    "reconnect_initial_delay_s": 1,
+    "reconnect_max_delay_s": 30,
+    "reconnect_backoff_multiplier": 2
+  },
+  "receiver": {
+    "queue_max_records": 50000,
+    "validate_gps_schema": true,
+    "expected_fields": ["device_id", "timestamp", "latitude", "longitude"],
+    "detect_batch_gaps": true,
+    "drop_invalid_records": true
+  },
+  "storage": {
+    "save_raw_data": true,
+    "output_directory": "data/received/x",
+    "output_filename": "received_gps.csv",
+    "flush_interval_s": 5
+  },
+  "processing": {
+    "forward_to_queue": true
+  },
+  "logging": {
+    "level": "INFO",
+    "log_file": "logs/receiver.log"
+  }
+}
