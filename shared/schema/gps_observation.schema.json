@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/gnn-final-project/gps-observation.schema.json",
+  "title": "Component 1 GPS Observation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["device_id", "timestamp", "latitude", "longitude"],
+  "properties": {
+    "device_id": {"type": "string", "minLength": 1},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "latitude": {"type": "number", "minimum": -90, "maximum": 90},
+    "longitude": {"type": "number", "minimum": -180, "maximum": 180}
+  }
+}
