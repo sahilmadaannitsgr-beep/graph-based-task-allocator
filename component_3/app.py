@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
@@ -48,8 +49,21 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def db_connection():
+    conn = connect()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def init_store() -> None:
-    with connect() as conn:
+    with db_connection() as conn:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS received_vehicle_states (
                 record_key TEXT PRIMARY KEY,
@@ -72,7 +86,7 @@ def init_store() -> None:
 def export_csv() -> None:
     """Rebuild the local CSV from the durable receiver store."""
     with LOCK:
-        with connect() as conn:
+        with db_connection() as conn:
             rows = conn.execute(
                 """SELECT vehicle_id,window_start_timestamp,window_duration_s,
                           velocity_mps,direction_degrees,task_capable_bit_integer
@@ -138,7 +152,7 @@ init_store()
 
 @app.get("/health")
 def health():
-    with connect() as conn:
+    with db_connection() as conn:
         count = conn.execute(
             "SELECT COUNT(*) FROM received_vehicle_states"
         ).fetchone()[0]
@@ -164,7 +178,7 @@ def receive_vehicle_state(
 
     key = record_key(record, idempotency_key)
     with LOCK:
-        with connect() as conn:
+        with db_connection() as conn:
             cursor = conn.execute(
                 """INSERT OR IGNORE INTO received_vehicle_states
                    (record_key,vehicle_id,window_start_timestamp,window_duration_s,
@@ -190,7 +204,7 @@ def receive_vehicle_state(
 def list_vehicle_states(limit: int = 100):
     if not 1 <= limit <= 1000:
         raise HTTPException(status_code=422, detail="limit must be between 1 and 1000")
-    with connect() as conn:
+    with db_connection() as conn:
         rows = conn.execute(
             """SELECT vehicle_id,window_start_timestamp,window_duration_s,
                       velocity_mps,direction_degrees,task_capable_bit_integer
