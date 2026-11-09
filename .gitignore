@@ -72,3 +72,8 @@ datasets/
 
 component_2/logs
 component_2/data
+
+# Shared project database is generated locally; commit schema and seed scripts only.
+shared/database/*.db
+shared/database/*.db-shm
+shared/database/*.db-wal
