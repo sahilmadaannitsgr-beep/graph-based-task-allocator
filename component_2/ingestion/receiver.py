@@ -163,6 +163,7 @@ def run_receiver(config: dict, root: Path, logger: logging.Logger,
                  url_override: str | None = None):
     """Receive SSE batches, fan out validated fixes to archive and preprocessing."""
     from processing.engine import LiveGPSProcessor, ProcessingWorker
+    from processing.sender import DurableComponent3Sender
 
     conn = config.get("connection", {})
     receiver = config.get("receiver", {})
@@ -184,6 +185,7 @@ def run_receiver(config: dict, root: Path, logger: logging.Logger,
     processing_queue: queue.Queue = queue.Queue(maxsize=max_records)
     writer = None
     processor_worker = None
+    component3_sender = None
 
     if save_raw:
         writer = CSVWriter(
@@ -196,6 +198,25 @@ def run_receiver(config: dict, root: Path, logger: logging.Logger,
     processing_output = resolve_path(
         root, processing.get("output_file", "data/processed/vehicle_states.jsonl")
     )
+    state_csv_output = resolve_path(
+        root, processing.get("output_csv_file", "data/processed/vehicle_states.csv")
+    )
+    sender_settings = config.get("component3", {})
+    if sender_settings.get("enabled", True):
+        spool_path = resolve_path(
+            root, sender_settings.get("outbox_file", "data/processed/component3_outbox.jsonl")
+        )
+        component3_sender = DurableComponent3Sender(
+            receiver_url=sender_settings.get(
+                "receiver_url", "http://127.0.0.1:8002/api/v1/vehicle-states"
+            ),
+            spool_path=spool_path,
+            logger=logger,
+            timeout_s=float(sender_settings.get("timeout_s", 5)),
+            retry_initial_s=float(sender_settings.get("retry_initial_delay_s", 1)),
+            retry_max_s=float(sender_settings.get("retry_max_delay_s", 30))
+        )
+        component3_sender.start()
     registration = config.get("registration", {})
     database_path = (
         resolve_path(root, registration.get("database_path", "../shared/database/project.db"))
@@ -209,14 +230,20 @@ def run_receiver(config: dict, root: Path, logger: logging.Logger,
         )
     processor = LiveGPSProcessor(
         processing, None, processing_output, logger,
-        database_path=database_path
+        database_path=database_path,
+        csv_output_path=state_csv_output
     )
-    processor_worker = ProcessingWorker(processing_queue, processor, logger)
+    processor_worker = ProcessingWorker(
+        processing_queue, processor, logger, output_sender=component3_sender
+    )
     processor_worker.start()
-    logger.info("Processed vehicle states: %s", processing_output)
+    logger.info("Processed vehicle states JSONL: %s", processing_output)
+    logger.info("Processed vehicle states CSV: %s", state_csv_output)
+    if component3_sender:
+        logger.info("Component 3 HTTP forwarding enabled: %s", component3_sender.receiver_url)
     logger.info(
-        "Sliding window: %.1fs | update interval: %.1fs | max GPS gap: %.1fs",
-        processor.window_s, processor.update_s, processor.max_gap_s
+        "Sliding window: %.1fs | stride: %.1fs | max GPS gap: %.1fs",
+        processor.window_s, processor.stride_s, processor.max_gap_s
     )
 
     reconnect = bool(conn.get("reconnect_enabled", True))
@@ -327,6 +354,11 @@ def run_receiver(config: dict, root: Path, logger: logging.Logger,
             processor_worker.join(timeout=15)
             if processor_worker.is_alive():
                 logger.error("GPS processing worker did not stop within 15 seconds")
+        if component3_sender:
+            component3_sender.stop()
+            component3_sender.join(timeout=5)
+            if component3_sender.is_alive():
+                logger.warning("Component 3 sender remains active; pending records stay in its durable outbox")
         if writer:
             writer.stop()
             writer.join(timeout=15)
