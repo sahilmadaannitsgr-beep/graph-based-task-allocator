@@ -12,7 +12,12 @@
   "receiver": {
     "queue_max_records": 50000,
     "validate_gps_schema": true,
-    "expected_fields": ["device_id", "timestamp", "latitude", "longitude"],
+    "expected_fields": [
+      "device_id",
+      "timestamp",
+      "latitude",
+      "longitude"
+    ],
     "detect_batch_gaps": true,
     "drop_invalid_records": true
   },
@@ -23,7 +28,13 @@
     "flush_interval_s": 5
   },
   "processing": {
-    "forward_to_queue": true
+    "forward_to_queue": true,
+    "window_duration_s": 10.0,
+    "update_interval_s": 2.0,
+    "max_fix_gap_s": 5.0,
+    "stationary_speed_threshold_mps": 0.5,
+    "output_file": "data/processed/vehicle_states.jsonl",
+    "capabilities_file": "capabilities.json"
   },
   "logging": {
     "level": "INFO",

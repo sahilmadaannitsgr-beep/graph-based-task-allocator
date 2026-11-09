@@ -1,0 +1,5 @@
+{
+  "_comment": "Replace example masks with your actual vehicle IoT masks and task requirement masks. Masks are decimal integers.",
+  "vehicle_capabilities": {},
+  "task_requirements": {}
+}

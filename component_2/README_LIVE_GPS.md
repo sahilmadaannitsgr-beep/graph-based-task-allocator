@@ -142,3 +142,13 @@ head component_2/data/received/x/received_gps.csv
 - This receiver accepts the producer envelope described above. If your local
   `run_stream_server.py` emits a different JSON shape, share one raw SSE event
   and the parser can be adjusted to match it.
+
+
+## 9. Component 2 preprocessing
+
+The receiver is now connected to the live preprocessing engine. Validated GPS
+observations are sent to both the raw CSV archive and the per-vehicle sliding
+window processor. Configure vehicle/task bitmasks in `capabilities.json`.
+
+See the top-level `README.md` for the complete Component 2 processing contract,
+output schema, motion calculations, configuration, and tests.

@@ -158,8 +158,12 @@ def parse_sse_data(response, logger: logging.Logger):
             logger.exception("Could not decode final SSE event")
 
 
+
 def run_receiver(config: dict, root: Path, logger: logging.Logger,
                  url_override: str | None = None):
+    """Receive SSE batches, fan out validated fixes to archive and preprocessing."""
+    from processing.engine import LiveGPSProcessor, ProcessingWorker
+
     conn = config.get("connection", {})
     receiver = config.get("receiver", {})
     storage = config.get("storage", {})
@@ -175,17 +179,40 @@ def run_receiver(config: dict, root: Path, logger: logging.Logger,
     output_dir = resolve_path(root, storage.get("output_directory", "data/received"))
     output_path = output_dir / storage.get("output_filename", "received_gps.csv")
     max_records = int(receiver.get("queue_max_records", 50000))
-    record_queue: queue.Queue = queue.Queue(maxsize=max_records)
 
+    archive_queue: queue.Queue = queue.Queue(maxsize=max_records)
+    processing_queue: queue.Queue = queue.Queue(maxsize=max_records)
     writer = None
+    processor_worker = None
+
     if save_raw:
-        output_dir.mkdir(parents=True, exist_ok=True)
         writer = CSVWriter(
-            record_queue, output_path, fields,
+            archive_queue, output_path, fields,
             float(storage.get("flush_interval_s", 5)), logger
         )
         writer.start()
         logger.info("Raw GPS archive: %s", output_path)
+
+    processing_output = resolve_path(
+        root, processing.get("output_file", "data/processed/vehicle_states.jsonl")
+    )
+    capabilities_path = resolve_path(
+        root, processing.get("capabilities_file", "capabilities.json")
+    )
+    if capabilities_path.exists():
+        with capabilities_path.open("r", encoding="utf-8") as f:
+            capabilities = json.load(f)
+    else:
+        capabilities = {"vehicle_capabilities": {}, "task_requirements": {}}
+        logger.warning("Capabilities file not found; task compatibility will be marked unknown")
+    processor = LiveGPSProcessor(processing, capabilities, processing_output, logger)
+    processor_worker = ProcessingWorker(processing_queue, processor, logger)
+    processor_worker.start()
+    logger.info("Processed vehicle states: %s", processing_output)
+    logger.info(
+        "Sliding window: %.1fs | update interval: %.1fs | max GPS gap: %.1fs",
+        processor.window_s, processor.update_s, processor.max_gap_s
+    )
 
     reconnect = bool(conn.get("reconnect_enabled", True))
     delay = float(conn.get("reconnect_initial_delay_s", 1))
@@ -212,6 +239,9 @@ def run_receiver(config: dict, root: Path, logger: logging.Logger,
                     delay = float(conn.get("reconnect_initial_delay_s", 1))
 
                     for payload in parse_sse_data(response, logger):
+                        if not isinstance(payload, dict):
+                            logger.warning("Ignoring non-object SSE payload")
+                            continue
                         message_type = payload.get("type")
                         if message_type == "error":
                             raise RuntimeError(payload.get("message", "Producer error"))
@@ -219,10 +249,16 @@ def run_receiver(config: dict, root: Path, logger: logging.Logger,
                             logger.info("Producer marked stream complete")
                             return
 
-                        # Producer batches contain batch_id/sim_time_s/count/observations.
                         observations = payload.get("observations")
                         if observations is None:
-                            logger.debug("Ignoring SSE control payload: %s", payload)
+                            # Also accept a single-observation SSE message.
+                            if set(payload.keys()) == set(DEFAULT_FIELDS):
+                                observations = [payload]
+                            else:
+                                logger.debug("Ignoring SSE control payload: %s", payload)
+                                continue
+                        if not isinstance(observations, list):
+                            logger.warning("Invalid observations field; expected a list")
                             continue
 
                         batch_id = payload.get("batch_id")
@@ -254,15 +290,13 @@ def run_receiver(config: dict, root: Path, logger: logging.Logger,
                                     raise
                                 continue
 
-                            if processing.get("forward_to_queue", True) or save_raw:
-                                try:
-                                    record_queue.put(record, timeout=5)
-                                except queue.Full:
-                                    logger.error(
-                                        "Receiver queue full; record could not be queued. "
-                                        "Increase receiver.queue_max_records or speed up consumers."
-                                    )
-                                    raise RuntimeError("GPS receiver queue is full")
+                            try:
+                                processing_queue.put(record, timeout=5)
+                                if save_raw:
+                                    archive_queue.put(record, timeout=5)
+                            except queue.Full:
+                                logger.error("Receiver queue full; stopping to avoid silent data loss")
+                                raise RuntimeError("GPS receiver queue is full")
                             batch_valid += 1
                             total_valid += 1
 
@@ -283,6 +317,11 @@ def run_receiver(config: dict, root: Path, logger: logging.Logger,
                 time.sleep(delay)
                 delay = min(delay * multiplier, max_delay)
     finally:
+        if processor_worker:
+            processor_worker.stop()
+            processor_worker.join(timeout=15)
+            if processor_worker.is_alive():
+                logger.error("GPS processing worker did not stop within 15 seconds")
         if writer:
             writer.stop()
             writer.join(timeout=15)
@@ -294,7 +333,6 @@ def run_receiver(config: dict, root: Path, logger: logging.Logger,
             "Receiver stopped. Valid records=%s, invalid records=%s",
             total_valid, total_invalid
         )
-
 
 def main():
     parser = argparse.ArgumentParser(description="Component 2 live GPS SSE receiver")
