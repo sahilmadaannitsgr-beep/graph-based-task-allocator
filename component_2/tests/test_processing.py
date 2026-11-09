@@ -41,3 +41,42 @@ def test_gap_disables_motion_but_keeps_capability_result(tmp_path):
     state = processor.process({"device_id":"v1","timestamp":"2026-01-01T00:00:05","latitude":1.1,"longitude":1.1})
     assert state["motion_quality"] == "gap_exceeds_limit"
     assert state["compatible_tasks"] == ["t"]
+
+
+def test_live_registry_refresh_updates_vehicle_and_task_masks(tmp_path):
+    import json
+    import logging
+    from processing.engine import LiveGPSProcessor
+
+    registry = tmp_path / "vehicle_registry.json"
+    registry.write_text(json.dumps({
+        "iot_device_types": {},
+        "vehicles": {"v1": {"capability_mask": 3}},
+        "tasks": {"inspection": {"required_mask": 3}}
+    }), encoding="utf-8")
+    processor = LiveGPSProcessor(
+        {"window_duration_s": 10, "update_interval_s": 1, "max_fix_gap_s": 5},
+        {"vehicle_capabilities": {}, "task_requirements": {}},
+        tmp_path / "states.jsonl", logging.getLogger("registry-test"),
+        registry_path=registry
+    )
+    state = processor.process({
+        "device_id": "v1", "timestamp": "2026-01-01T00:00:00",
+        "latitude": 44.0, "longitude": 11.0
+    })
+    assert state["capability_known"] is True
+    assert state["compatible_tasks"] == ["inspection"]
+
+    registry.write_text(json.dumps({
+        "iot_device_types": {},
+        "vehicles": {"v1": {"capability_mask": 1}},
+        "tasks": {"inspection": {"required_mask": 3}}
+    }), encoding="utf-8")
+    # Force a detectable mtime difference on filesystems with coarse timestamp resolution.
+    import os, time
+    os.utime(registry, ns=(registry.stat().st_atime_ns, registry.stat().st_mtime_ns + 2_000_000))
+    state = processor.process({
+        "device_id": "v1", "timestamp": "2026-01-01T00:00:02",
+        "latitude": 44.00001, "longitude": 11.0
+    })
+    assert state["compatible_tasks"] == []

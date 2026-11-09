@@ -205,7 +205,15 @@ def run_receiver(config: dict, root: Path, logger: logging.Logger,
     else:
         capabilities = {"vehicle_capabilities": {}, "task_requirements": {}}
         logger.warning("Capabilities file not found; task compatibility will be marked unknown")
-    processor = LiveGPSProcessor(processing, capabilities, processing_output, logger)
+    registration = config.get("registration", {})
+    registry_path = (
+        resolve_path(root, registration.get("registry_file", "registration/data/vehicle_registry.json"))
+        if registration.get("enabled", True) else None
+    )
+    processor = LiveGPSProcessor(
+        processing, capabilities, processing_output, logger,
+        registry_path=registry_path
+    )
     processor_worker = ProcessingWorker(processing_queue, processor, logger)
     processor_worker.start()
     logger.info("Processed vehicle states: %s", processing_output)

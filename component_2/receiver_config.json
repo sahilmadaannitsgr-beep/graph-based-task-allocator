@@ -39,5 +39,10 @@
   "logging": {
     "level": "INFO",
     "log_file": "logs/receiver.log"
+  },
+  "registration": {
+    "enabled": true,
+    "registry_file": "registration/data/vehicle_registry.json",
+    "admin_token_env": "COMPONENT2_ADMIN_TOKEN"
   }
 }

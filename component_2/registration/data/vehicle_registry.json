@@ -1,0 +1,46 @@
+{
+  "iot_device_types": {
+    "camera": {
+      "bit": 1,
+      "active": true
+    },
+    "gps": {
+      "bit": 2,
+      "active": true
+    }
+  },
+  "vehicles": {
+    "dev_d3dc3bcc773f": {
+      "vehicle_id": "dev_d3dc3bcc773f",
+      "devices": [
+        {
+          "type": "camera",
+          "bit": 1,
+          "source": "configured",
+          "hardware_id": null,
+          "metadata": {}
+        },
+        {
+          "type": "gps",
+          "bit": 2,
+          "source": "configured",
+          "hardware_id": null,
+          "metadata": {}
+        }
+      ],
+      "capability_mask": 3,
+      "capability_mask_binary": "11",
+      "agent_version": "1.0.0",
+      "client": {
+        "hostname": "sahilmadaan048",
+        "platform": "Windows-11-10.0.26300-SP0",
+        "python_version": "3.13.5"
+      },
+      "reported_at": "2026-11-09T09:35:21.922790+00:00",
+      "server_updated_at": "2026-11-09T09:35:22.010525+00:00",
+      "last_seen_at": "2026-11-09T09:35:22.010525+00:00",
+      "status": "online"
+    }
+  },
+  "tasks": {}
+}

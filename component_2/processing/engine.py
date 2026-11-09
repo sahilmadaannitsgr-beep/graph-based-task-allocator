@@ -46,7 +46,8 @@ def compatible_tasks(vehicle_mask: int, requirements: dict[str, int]) -> list[st
 
 class LiveGPSProcessor:
     """Consumes validated GPS records and emits one state per vehicle on cadence."""
-    def __init__(self, settings: dict, capabilities: dict, output_path: Path, logger):
+    def __init__(self, settings: dict, capabilities: dict, output_path: Path, logger,
+                 registry_path: Path | None = None):
         self.window_s = float(settings.get("window_duration_s", 10.0))
         self.update_s = float(settings.get("update_interval_s", 2.0))
         self.max_gap_s = float(settings.get("max_fix_gap_s", 5.0))
@@ -55,12 +56,43 @@ class LiveGPSProcessor:
             raise ValueError("Require window_duration_s > update_interval_s > 0")
         self.vehicle_masks = capabilities.get("vehicle_capabilities", {})
         self.task_requirements = capabilities.get("task_requirements", {})
+        self.registry_path = registry_path
+        self._registry_mtime_ns = None
         self.history = defaultdict(deque)
         self.last_emit = {}
         self.output_path = output_path
         self.logger = logger
+        self._reload_registry_if_changed(force=True)
         self.lock = threading.Lock()
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _reload_registry_if_changed(self, force: bool = False) -> None:
+        """Refresh vehicle/task masks from the live registration service's JSON store."""
+        if self.registry_path is None or not self.registry_path.exists():
+            return
+        try:
+            mtime_ns = self.registry_path.stat().st_mtime_ns
+            if not force and mtime_ns == self._registry_mtime_ns:
+                return
+            with self.registry_path.open("r", encoding="utf-8") as handle:
+                registry = json.load(handle)
+            vehicles = registry.get("vehicles", {})
+            tasks = registry.get("tasks", {})
+            self.vehicle_masks = {
+                vehicle_id: int(item["capability_mask"])
+                for vehicle_id, item in vehicles.items()
+            }
+            self.task_requirements = {
+                task_id: int(item["required_mask"])
+                for task_id, item in tasks.items()
+            }
+            self._registry_mtime_ns = mtime_ns
+            self.logger.info(
+                "Reloaded live capability registry: %d vehicles, %d tasks",
+                len(self.vehicle_masks), len(self.task_requirements)
+            )
+        except (OSError, ValueError, KeyError, TypeError):
+            self.logger.exception("Could not reload capability registry; retaining last valid masks")
 
     def process(self, record: dict[str, Any]) -> dict | None:
         device_id = record["device_id"]
@@ -77,8 +109,7 @@ class LiveGPSProcessor:
                 self.logger.warning("Ignoring out-of-order/duplicate fix for %s", device_id)
                 return None
             points.append(fix)
-            cutoff = timestamp.timestamp() - self.window_s if timestamp.tzinfo else None
-            while len(points) > 2:
+            while len(points) > 1:
                 age = (timestamp - points[0]["timestamp"]).total_seconds()
                 if age <= self.window_s:
                     break
@@ -98,6 +129,7 @@ class LiveGPSProcessor:
         return state
 
     def _build_state(self, device_id: str, points: list[dict]) -> dict:
+        self._reload_registry_if_changed()
         vehicle_mask = self.vehicle_masks.get(device_id)
         capability_known = vehicle_mask is not None
         tasks = compatible_tasks(int(vehicle_mask), self.task_requirements) if capability_known else []

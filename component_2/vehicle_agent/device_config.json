@@ -1,0 +1,24 @@
+{
+  "vehicle_id": "dev_d3dc3bcc773f",
+  "server_url": "http://127.0.0.1:8001",
+  "api_token": "ueK-vqkjjaSGM70nOPEj_t_9UacTznVyMnPU8PpX894",
+  "heartbeat_interval_s": 300,
+  "devices": [
+    {
+      "type": "camera",
+      "enabled": true,
+      "source": "configured"
+    },
+    {
+      "type": "gps",
+      "enabled": true,
+      "source": "configured"
+    },
+    {
+      "type": "rfid",
+      "enabled": false,
+      "source": "configured"
+    }
+  ]
+}
+
