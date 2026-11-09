@@ -503,6 +503,43 @@ Detailed documentation for Component 1 is available separately.
 
 ---
 
+## Component 2 → Component 3 data handoff
+
+Component 2 maintains a 10-second per-vehicle GPS window and emits a new state
+every 2 seconds (the stride). After the initial warm-up, the windows overlap by
+8 seconds. Each emitted state is saved locally as JSONL and CSV, then sent by
+HTTP POST to the Component 3 receiver.
+
+The Component 3 receiver is available at `component_3/app.py`. It validates
+the six-field vehicle-state contract, deduplicates retried requests, and stores
+accepted records in `component_3/data/received/vehicle_states.csv` and a local
+SQLite receipt store. The GNN model and training pipeline remain a separate
+planned part of Component 3.
+
+Start the receiver in its own terminal:
+
+```powershell
+cd component_3
+python -m pip install -r requirements.txt
+uvicorn app:app --host 127.0.0.1 --port 8002
+```
+
+Health check:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8002/health
+```
+
+Component 2's sender is enabled in `component_2/receiver_config.json` and
+targets `http://127.0.0.1:8002/api/v1/vehicle-states`. If Component 3 is
+unavailable, Component 2 retains pending messages in
+`component_2/data/processed/component3_outbox.jsonl` and retries delivery.
+
+Local Component 2 files:
+- `component_2/data/processed/vehicle_states.jsonl`
+- `component_2/data/processed/vehicle_states.csv`
+- `component_2/data/processed/component3_outbox.jsonl` (pending deliveries)
+
 ## Limitations and Assumptions
 
 - The generated GPS trajectories are synthetic, not measured real-world GPS observations.
