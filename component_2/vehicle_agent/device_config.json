@@ -1,7 +1,7 @@
 {
   "vehicle_id": "dev_d3dc3bcc773f",
   "server_url": "http://127.0.0.1:8001",
-  "api_token": "PASTE_FRESH_TOKEN_FROM_provision_vehicle.py",
+  "api_token": "5k5nDNoNYzPT6VpaLScekqAWITzVOWs1OYzS76ZCvt4",
   "heartbeat_interval_s": 300,
   "devices": [
     {"type": "camera", "enabled": true, "source": "configured"},

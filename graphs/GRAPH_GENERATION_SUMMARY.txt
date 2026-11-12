@@ -1,0 +1,43 @@
+GRAPH GENERATION SUMMARY
+================================================================================
+GPS source: D:\7th semester\gnn final year project\implement\component_2\data\received\x\received_gps.csv
+Vehicle-state source: D:\7th semester\gnn final year project\implement\component_2\data\processed\vehicle_states.csv
+
+GPS rows read: 143,312
+Valid GPS vehicles: 349
+Invalid GPS rows skipped: 0
+GPS time range: 2026-01-01 07:00:10+00:00 to 2026-01-01 07:10:04+00:00
+GPS snapshot selected: 2026-01-01 07:10:03+00:00 (346 records)
+
+Vehicle-state rows read: 42,604
+Vehicles in state file: 260
+State time range: 2026-01-01 07:00:10+00:00 to 2026-01-01 07:07:16+00:00
+Complete 10-second windows: 40,608
+Other/partial windows: 1,996
+Valid full-window speeds: 40,608
+Invalid/missing full-window speeds: 0
+Approximate mean speed: 8.374 m/s
+Approximate median speed: 10.625 m/s
+
+Vehicles shown in proximity plot: 346
+Proximity pairs within threshold (before plot sampling): 395
+Vehicles with at least one current capability bit: 3 bit memberships (not unique vehicles)
+
+Interpretation notes:
+- Trajectory plot shows a configurable sample chosen by largest first-to-last displacement, not every vehicle.
+- Active vehicle counts are distinct GPS device IDs per minute; they do not imply task availability.
+- Speed plots use complete 10-second windows only. Time-series quantiles are histogram approximations.
+- Proximity links mean two vehicles were within the configured distance at one selected GPS snapshot only.
+- Capability heatmap and bipartite edges are decoded from task_capable_bit_integer.
+- Without a task-label file, task types are named by bit position (Task bit N).
+- The bipartite graph is capability compatibility, NOT actual task allocation/assignment.
+- No road-network basemap or real task-instance locations are inferred.
+
+Generated figures:
+- 01_vehicle_trajectories.png
+- 02_active_vehicles_over_time.png
+- 03_vehicle_speed_over_time.png
+- 04_vehicle_speed_distribution.png
+- 05_vehicle_proximity_network.png
+- 06_vehicle_task_capability_heatmap.png
+- 07_vehicle_task_type_bipartite_compatibility.png
